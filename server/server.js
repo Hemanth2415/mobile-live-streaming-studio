@@ -1,6 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
+const mysql = require("mysql2/promise");
+const crypto = require("crypto");
+
 require("dotenv").config();
 
 const app = express();
@@ -10,23 +13,69 @@ app.use(express.json());
 
 
 // ===============================
-// Email configuration
+// MySQL Database Configuration
 // ===============================
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
+const db = mysql.createPool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+
+  // Aiven requires SSL
+  ssl: {
+    rejectUnauthorized: false
+  },
+
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
 
 // ===============================
-// Temporary OTP storage
+// Test MySQL Connection
 // ===============================
 
-const otpStore = new Map();
+async function testDatabaseConnection() {
+
+  try {
+
+    const connection = await db.getConnection();
+
+    console.log(
+      "MySQL database connected successfully"
+    );
+
+    connection.release();
+
+  } catch (error) {
+
+    console.error(
+      "MySQL connection failed:",
+      error
+    );
+
+  }
+
+}
+
+
+// ===============================
+// Email Configuration
+// ===============================
+
+const transporter = nodemailer.createTransport({
+
+  service: "gmail",
+
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+
+});
 
 
 // ===============================
@@ -34,7 +83,11 @@ const otpStore = new Map();
 // ===============================
 
 function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+
+  return Math.floor(
+    100000 + Math.random() * 900000
+  ).toString();
+
 }
 
 
@@ -48,29 +101,67 @@ app.post("/request-access", async (req, res) => {
 
     const { deviceId } = req.body;
 
+
+    // Check Device ID
     if (!deviceId) {
+
       return res.status(400).json({
+
         success: false,
+
         message: "Device ID is required"
+
       });
+
     }
 
-    // Generate a new OTP
+
+    // Generate OTP
     const otp = generateOTP();
 
+
     // OTP expires after 10 minutes
-    const expiresAt = Date.now() + 10 * 60 * 1000;
+    const expiresAt = new Date(
+      Date.now() + 10 * 60 * 1000
+    );
 
-    // Store OTP for this specific device
-    otpStore.set(deviceId, {
-      otp,
-      expiresAt,
-      attempts: 0
-    });
 
-    // Send OTP to your email
+    // Store OTP in MySQL
+    await db.execute(
+
+      `INSERT INTO access_requests
+        (
+          device_id,
+          otp,
+          otp_expires_at
+        )
+
+       VALUES (?, ?, ?)
+
+       ON DUPLICATE KEY UPDATE
+
+          otp = VALUES(otp),
+
+          otp_expires_at = VALUES(otp_expires_at),
+
+          access_token = NULL,
+
+          token_expires_at = NULL`,
+
+      [
+        deviceId,
+        otp,
+        expiresAt
+      ]
+
+    );
+
+
+    // Send OTP to owner email
     await transporter.sendMail({
+
       from: process.env.EMAIL_USER,
+
       to: process.env.EMAIL_USER,
 
       subject: "StreamFlow Access Request",
@@ -88,22 +179,38 @@ This OTP will expire in 10 minutes.
 
 If you did not expect this request, you can ignore this email.
 `
+
     });
 
-    console.log(`OTP generated for device ${deviceId}`);
+
+    console.log(
+      `OTP generated for device ${deviceId}`
+    );
+
 
     res.json({
+
       success: true,
+
       message: "Access request received. OTP sent."
+
     });
+
 
   } catch (error) {
 
-    console.error("Email error:", error);
+    console.error(
+      "Request access error:",
+      error
+    );
+
 
     res.status(500).json({
+
       success: false,
-      message: "Could not send OTP"
+
+      message: "Could not process access request"
+
     });
 
   }
@@ -115,87 +222,349 @@ If you did not expect this request, you can ignore this email.
 // Verify OTP
 // ===============================
 
-app.post("/verify-otp", (req, res) => {
+app.post("/verify-otp", async (req, res) => {
 
-  const { deviceId, otp } = req.body;
+  try {
 
-  if (!deviceId || !otp) {
-    return res.status(400).json({
-      success: false,
-      message: "Device ID and OTP are required"
+    const { deviceId, otp } = req.body;
+
+
+    // Check input
+    if (!deviceId || !otp) {
+
+      return res.status(400).json({
+
+        success: false,
+
+        message: "Device ID and OTP are required"
+
+      });
+
+    }
+
+
+    // Find device in MySQL
+    const [rows] = await db.execute(
+
+      `SELECT *
+
+       FROM access_requests
+
+       WHERE device_id = ?`,
+
+      [deviceId]
+
+    );
+
+
+    const record = rows[0];
+
+
+    // No OTP request
+    if (!record) {
+
+      return res.status(400).json({
+
+        success: false,
+
+        message: "No OTP request found for this device"
+
+      });
+
+    }
+
+
+    // Check OTP expiration
+    if (
+
+      !record.otp_expires_at ||
+
+      new Date() > new Date(record.otp_expires_at)
+
+    ) {
+
+      return res.status(400).json({
+
+        success: false,
+
+        message: "OTP has expired"
+
+      });
+
+    }
+
+
+    // Check OTP
+    if (
+
+      record.otp !== otp.toString().trim()
+
+    ) {
+
+      return res.status(400).json({
+
+        success: false,
+
+        message: "Invalid OTP"
+
+      });
+
+    }
+
+
+    // ===============================
+    // OTP Correct
+    // ===============================
+
+
+    // Generate access token
+    const accessToken =
+      crypto.randomBytes(32).toString("hex");
+
+
+    // Access valid for 30 days
+    const tokenExpiresAt = new Date(
+
+      Date.now() +
+
+      30 * 24 * 60 * 60 * 1000
+
+    );
+
+
+    // Save access token in MySQL
+    await db.execute(
+
+      `UPDATE access_requests
+
+       SET
+
+          access_token = ?,
+
+          token_expires_at = ?,
+
+          otp = NULL,
+
+          otp_expires_at = NULL
+
+       WHERE device_id = ?`,
+
+      [
+
+        accessToken,
+
+        tokenExpiresAt,
+
+        deviceId
+
+      ]
+
+    );
+
+
+    console.log(
+      `Access granted to device ${deviceId}`
+    );
+
+
+    // Send token to Android app
+    res.json({
+
+      success: true,
+
+      message: "Access granted",
+
+      accessToken
+
     });
-  }
 
-  const record = otpStore.get(deviceId);
+  } catch (error) {
 
-  if (!record) {
-    return res.status(400).json({
+    console.error(
+      "OTP verification error:",
+      error
+    );
+
+
+    res.status(500).json({
+
       success: false,
-      message: "No OTP request found for this device"
+
+      message: "Could not verify OTP"
+
     });
+
   }
-
-  // Check expiration
-  if (Date.now() > record.expiresAt) {
-
-    otpStore.delete(deviceId);
-
-    return res.status(400).json({
-      success: false,
-      message: "OTP has expired"
-    });
-  }
-
-  // Check OTP
-  if (record.otp !== otp.toString().trim()) {
-
-    record.attempts++;
-
-    return res.status(400).json({
-      success: false,
-      message: "Invalid OTP"
-    });
-  }
-
-  // OTP is correct
-  otpStore.delete(deviceId);
-
-  // Temporary access token
-  const accessToken =
-    require("crypto").randomBytes(32).toString("hex");
-
-  res.json({
-    success: true,
-    message: "Access granted",
-    accessToken
-  });
 
 });
 
 
 // ===============================
-// Test route
+// Check Existing Access Token
+// ===============================
+
+app.get("/check-access", async (req, res) => {
+
+  try {
+
+    const authHeader =
+      req.headers.authorization;
+
+
+    if (!authHeader) {
+
+      return res.status(401).json({
+
+        success: false,
+
+        message: "Access token required"
+
+      });
+
+    }
+
+
+    const token =
+      authHeader.replace("Bearer ", "");
+
+
+    if (!token) {
+
+      return res.status(401).json({
+
+        success: false,
+
+        message: "Access token required"
+
+      });
+
+    }
+
+
+    // Find token in database
+    const [rows] = await db.execute(
+
+      `SELECT *
+
+       FROM access_requests
+
+       WHERE access_token = ?`,
+
+      [token]
+
+    );
+
+
+    const record = rows[0];
+
+
+    if (!record) {
+
+      return res.status(401).json({
+
+        success: false,
+
+        message: "Invalid access token"
+
+      });
+
+    }
+
+
+    // Check token expiration
+    if (
+
+      !record.token_expires_at ||
+
+      new Date() >
+
+      new Date(record.token_expires_at)
+
+    ) {
+
+      return res.status(401).json({
+
+        success: false,
+
+        message: "Access token has expired"
+
+      });
+
+    }
+
+
+    // Token is valid
+    res.json({
+
+      success: true,
+
+      message: "Access granted"
+
+    });
+
+
+  } catch (error) {
+
+    console.error(
+
+      "Access check error:",
+
+      error
+
+    );
+
+
+    res.status(500).json({
+
+      success: false,
+
+      message: "Could not check access"
+
+    });
+
+  }
+
+});
+
+
+// ===============================
+// Test Route
 // ===============================
 
 app.get("/", (req, res) => {
 
   res.json({
-    message: "StreamFlow Access Server is running"
+
+    message:
+      "StreamFlow Access Server is running"
+
   });
 
 });
 
 
 // ===============================
-// Start server
+// Start Server
 // ===============================
 
-const PORT = process.env.PORT || 5001;
+const PORT =
+  process.env.PORT || 5001;
 
-app.listen(PORT, "0.0.0.0", () => {
 
-  console.log(
-    `Access server running on port ${PORT}`
-  );
+app.listen(
 
-});
+  PORT,
+
+  "0.0.0.0",
+
+  async () => {
+
+    console.log(
+      `Access server running on port ${PORT}`
+    );
+
+    await testDatabaseConnection();
+
+  }
+
+);
