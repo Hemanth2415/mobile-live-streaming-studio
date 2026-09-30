@@ -1,6 +1,5 @@
 const express = require("express");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const mysql = require("mysql2/promise");
 const crypto = require("crypto");
 
@@ -48,23 +47,34 @@ async function testDatabaseConnection() {
     connection.release();
 
   } catch (error) {
-    console.error("MySQL connection failed:", error);
+
+    console.error(
+      "MySQL connection failed:",
+      error
+    );
+
   }
 }
 
 
 // =====================================================
-// Email Configuration
+// Test Resend Configuration
 // =====================================================
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
+function checkResendConfiguration() {
 
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+  if (!process.env.RESEND_API_KEY) {
+
+    console.error(
+      "RESEND_API_KEY is missing"
+    );
+
+    return false;
+
   }
-});
+
+  return true;
+}
 
 
 // =====================================================
@@ -72,7 +82,11 @@ const transporter = nodemailer.createTransport({
 // =====================================================
 
 function generateOTP() {
-  return crypto.randomInt(100000, 1000000).toString();
+
+  return crypto
+    .randomInt(100000, 1000000)
+    .toString();
+
 }
 
 
@@ -87,29 +101,62 @@ app.post("/request-access", async (req, res) => {
     const { deviceId } = req.body;
 
 
+    // =================================================
     // Check Device ID
+    // =================================================
+
     if (!deviceId) {
 
       return res.status(400).json({
+
         success: false,
+
         message: "Device ID is required"
+
       });
 
     }
 
 
+    // =================================================
+    // Check Resend API Key
+    // =================================================
+
+    if (!checkResendConfiguration()) {
+
+      return res.status(500).json({
+
+        success: false,
+
+        message: "Email service is not configured"
+
+      });
+
+    }
+
+
+    // =================================================
     // Generate OTP
+    // =================================================
+
     const otp = generateOTP();
 
 
+    // =================================================
     // OTP expires after 10 minutes
+    // =================================================
+
     const expiresAt = new Date(
-      Date.now() + 10 * 60 * 1000
+
+      Date.now() +
+
+      10 * 60 * 1000
+
     );
 
 
     // =================================================
-    // Store OTP in MySQL
+    // Store OTP in Aiven MySQL
     // =================================================
 
     await db.execute(
@@ -146,18 +193,40 @@ app.post("/request-access", async (req, res) => {
 
 
     // =================================================
-    // Send OTP to Owner Email
+    // Send OTP using Resend HTTPS API
     // =================================================
 
-    await transporter.sendMail({
+    const emailResponse = await fetch(
 
-      from: process.env.EMAIL_USER,
+      "https://api.resend.com/emails",
 
-      to: process.env.EMAIL_USER,
+      {
 
-      subject: "StreamFlow Access Request",
+        method: "POST",
 
-      text: `
+        headers: {
+
+          "Authorization":
+            `Bearer ${process.env.RESEND_API_KEY}`,
+
+          "Content-Type":
+            "application/json"
+
+        },
+
+        body: JSON.stringify({
+
+          from:
+            "StreamFlow <onboarding@resend.dev>",
+
+          to: [
+            process.env.EMAIL_USER
+          ],
+
+          subject:
+            "StreamFlow Access Request",
+
+          text: `
 A device is requesting access to StreamFlow.
 
 Device ID:
@@ -171,7 +240,47 @@ This OTP will expire in 10 minutes.
 If you did not expect this request, you can ignore this email.
 `
 
-    });
+        })
+
+      }
+
+    );
+
+
+    // =================================================
+    // Check Resend Response
+    // =================================================
+
+    if (!emailResponse.ok) {
+
+      const emailError =
+        await emailResponse.text();
+
+      console.error(
+        "Resend email error:",
+        emailError
+      );
+
+      return res.status(500).json({
+
+        success: false,
+
+        message:
+          "OTP was created but the email could not be sent"
+
+      });
+
+    }
+
+
+    const emailResult =
+      await emailResponse.json();
+
+
+    console.log(
+      "Resend email sent:",
+      emailResult.id
+    );
 
 
     console.log(
@@ -179,11 +288,16 @@ If you did not expect this request, you can ignore this email.
     );
 
 
+    // =================================================
+    // Success
+    // =================================================
+
     res.json({
 
       success: true,
 
-      message: "Access request received. OTP sent."
+      message:
+        "Access request received. OTP sent."
 
     });
 
@@ -200,7 +314,8 @@ If you did not expect this request, you can ignore this email.
 
       success: false,
 
-      message: "Could not process access request"
+      message:
+        "Could not process access request"
 
     });
 
@@ -217,17 +332,24 @@ app.post("/verify-otp", async (req, res) => {
 
   try {
 
-    const { deviceId, otp } = req.body;
+    const {
+      deviceId,
+      otp
+    } = req.body;
 
 
-    // Check input
+    // =================================================
+    // Check Input
+    // =================================================
+
     if (!deviceId || !otp) {
 
       return res.status(400).json({
 
         success: false,
 
-        message: "Device ID and OTP are required"
+        message:
+          "Device ID and OTP are required"
 
       });
 
@@ -254,14 +376,18 @@ app.post("/verify-otp", async (req, res) => {
     const record = rows[0];
 
 
-    // No request found
+    // =================================================
+    // No Request Found
+    // =================================================
+
     if (!record) {
 
       return res.status(400).json({
 
         success: false,
 
-        message: "No OTP request found for this device"
+        message:
+          "No OTP request found for this device"
 
       });
 
@@ -276,7 +402,9 @@ app.post("/verify-otp", async (req, res) => {
 
       !record.otp_expires_at ||
 
-      new Date() > new Date(record.otp_expires_at)
+      new Date() >
+
+      new Date(record.otp_expires_at)
 
     ) {
 
@@ -284,7 +412,8 @@ app.post("/verify-otp", async (req, res) => {
 
         success: false,
 
-        message: "OTP has expired"
+        message:
+          "OTP has expired"
 
       });
 
@@ -297,7 +426,8 @@ app.post("/verify-otp", async (req, res) => {
 
     if (
 
-      record.otp !== otp.toString().trim()
+      record.otp !==
+      otp.toString().trim()
 
     ) {
 
@@ -305,7 +435,8 @@ app.post("/verify-otp", async (req, res) => {
 
         success: false,
 
-        message: "Invalid OTP"
+        message:
+          "Invalid OTP"
 
       });
 
@@ -316,13 +447,14 @@ app.post("/verify-otp", async (req, res) => {
     // OTP Correct
     // =================================================
 
-
-    // Generate secure access token
     const accessToken =
       crypto.randomBytes(32).toString("hex");
 
 
-    // Access token valid for 30 days
+    // =================================================
+    // Access Token Valid for 30 Days
+    // =================================================
+
     const tokenExpiresAt = new Date(
 
       Date.now() +
@@ -366,7 +498,9 @@ app.post("/verify-otp", async (req, res) => {
 
 
     console.log(
+
       `Access granted to device ${deviceId}`
+
     );
 
 
@@ -378,7 +512,8 @@ app.post("/verify-otp", async (req, res) => {
 
       success: true,
 
-      message: "Access granted",
+      message:
+        "Access granted",
 
       accessToken
 
@@ -388,8 +523,11 @@ app.post("/verify-otp", async (req, res) => {
   } catch (error) {
 
     console.error(
+
       "OTP verification error:",
+
       error
+
     );
 
 
@@ -397,7 +535,8 @@ app.post("/verify-otp", async (req, res) => {
 
       success: false,
 
-      message: "Could not verify OTP"
+      message:
+        "Could not verify OTP"
 
     });
 
@@ -418,30 +557,39 @@ app.get("/check-access", async (req, res) => {
       req.headers.authorization;
 
 
-    // Check Authorization header
+    // =================================================
+    // Check Authorization Header
+    // =================================================
+
     if (!authHeader) {
 
       return res.status(401).json({
 
         success: false,
 
-        message: "Access token required"
+        message:
+          "Access token required"
 
       });
 
     }
 
 
-    // Expected format:
+    // =================================================
+    // Expected:
     // Authorization: Bearer TOKEN
+    // =================================================
 
-    if (!authHeader.startsWith("Bearer ")) {
+    if (
+      !authHeader.startsWith("Bearer ")
+    ) {
 
       return res.status(401).json({
 
         success: false,
 
-        message: "Invalid authorization format"
+        message:
+          "Invalid authorization format"
 
       });
 
@@ -449,7 +597,9 @@ app.get("/check-access", async (req, res) => {
 
 
     const token =
-      authHeader.substring(7).trim();
+      authHeader
+        .substring(7)
+        .trim();
 
 
     if (!token) {
@@ -458,7 +608,8 @@ app.get("/check-access", async (req, res) => {
 
         success: false,
 
-        message: "Access token required"
+        message:
+          "Access token required"
 
       });
 
@@ -466,7 +617,7 @@ app.get("/check-access", async (req, res) => {
 
 
     // =================================================
-    // Find Token in Database
+    // Find Token
     // =================================================
 
     const [rows] = await db.execute(
@@ -485,14 +636,18 @@ app.get("/check-access", async (req, res) => {
     const record = rows[0];
 
 
-    // Token not found
+    // =================================================
+    // Token Not Found
+    // =================================================
+
     if (!record) {
 
       return res.status(401).json({
 
         success: false,
 
-        message: "Invalid access token"
+        message:
+          "Invalid access token"
 
       });
 
@@ -517,7 +672,8 @@ app.get("/check-access", async (req, res) => {
 
         success: false,
 
-        message: "Access token has expired"
+        message:
+          "Access token has expired"
 
       });
 
@@ -532,7 +688,8 @@ app.get("/check-access", async (req, res) => {
 
       success: true,
 
-      message: "Access granted"
+      message:
+        "Access granted"
 
     });
 
@@ -540,8 +697,11 @@ app.get("/check-access", async (req, res) => {
   } catch (error) {
 
     console.error(
+
       "Access check error:",
+
       error
+
     );
 
 
@@ -549,7 +709,8 @@ app.get("/check-access", async (req, res) => {
 
       success: false,
 
-      message: "Could not check access"
+      message:
+        "Could not check access"
 
     });
 
@@ -591,7 +752,9 @@ app.listen(
   async () => {
 
     console.log(
+
       `Access server running on port ${PORT}`
+
     );
 
     await testDatabaseConnection();
