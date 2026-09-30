@@ -1,0 +1,6 @@
+{
+  "name": "Mobile Live Streaming Studio",
+  "description": "A high-fidelity mobile streaming control center featuring webcam chroma keying, customizable logo and ticker overlays, protocol selection, and quality bitrate monitoring.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
