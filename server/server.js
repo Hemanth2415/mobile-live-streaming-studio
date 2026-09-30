@@ -12,88 +12,73 @@ app.use(cors());
 app.use(express.json());
 
 
-// ===============================
-// MySQL Database Configuration
-// ===============================
+// =====================================================
+// MySQL / Aiven Database Configuration
+// =====================================================
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
+
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 
-  // Aiven requires SSL
-  ssl: {
-    rejectUnauthorized: false
-  },
-
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+
+  // Aiven MySQL requires SSL
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 
-// ===============================
+// =====================================================
 // Test MySQL Connection
-// ===============================
+// =====================================================
 
 async function testDatabaseConnection() {
-
   try {
-
     const connection = await db.getConnection();
 
-    console.log(
-      "MySQL database connected successfully"
-    );
+    console.log("MySQL database connected successfully");
 
     connection.release();
 
   } catch (error) {
-
-    console.error(
-      "MySQL connection failed:",
-      error
-    );
-
+    console.error("MySQL connection failed:", error);
   }
-
 }
 
 
-// ===============================
+// =====================================================
 // Email Configuration
-// ===============================
+// =====================================================
 
 const transporter = nodemailer.createTransport({
-
   service: "gmail",
 
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   }
-
 });
 
 
-// ===============================
+// =====================================================
 // Generate 6-digit OTP
-// ===============================
+// =====================================================
 
 function generateOTP() {
-
-  return Math.floor(
-    100000 + Math.random() * 900000
-  ).toString();
-
+  return crypto.randomInt(100000, 1000000).toString();
 }
 
 
-// ===============================
+// =====================================================
 // Request Access
-// ===============================
+// =====================================================
 
 app.post("/request-access", async (req, res) => {
 
@@ -106,11 +91,8 @@ app.post("/request-access", async (req, res) => {
     if (!deviceId) {
 
       return res.status(400).json({
-
         success: false,
-
         message: "Device ID is required"
-
       });
 
     }
@@ -126,7 +108,10 @@ app.post("/request-access", async (req, res) => {
     );
 
 
+    // =================================================
     // Store OTP in MySQL
+    // =================================================
+
     await db.execute(
 
       `INSERT INTO access_requests
@@ -140,9 +125,9 @@ app.post("/request-access", async (req, res) => {
 
        ON DUPLICATE KEY UPDATE
 
-          otp = VALUES(otp),
+          otp = ?,
 
-          otp_expires_at = VALUES(otp_expires_at),
+          otp_expires_at = ?,
 
           access_token = NULL,
 
@@ -151,13 +136,19 @@ app.post("/request-access", async (req, res) => {
       [
         deviceId,
         otp,
+        expiresAt,
+
+        otp,
         expiresAt
       ]
 
     );
 
 
-    // Send OTP to owner email
+    // =================================================
+    // Send OTP to Owner Email
+    // =================================================
+
     await transporter.sendMail({
 
       from: process.env.EMAIL_USER,
@@ -218,9 +209,9 @@ If you did not expect this request, you can ignore this email.
 });
 
 
-// ===============================
+// =====================================================
 // Verify OTP
-// ===============================
+// =====================================================
 
 app.post("/verify-otp", async (req, res) => {
 
@@ -243,7 +234,10 @@ app.post("/verify-otp", async (req, res) => {
     }
 
 
-    // Find device in MySQL
+    // =================================================
+    // Find Device
+    // =================================================
+
     const [rows] = await db.execute(
 
       `SELECT *
@@ -260,7 +254,7 @@ app.post("/verify-otp", async (req, res) => {
     const record = rows[0];
 
 
-    // No OTP request
+    // No request found
     if (!record) {
 
       return res.status(400).json({
@@ -274,7 +268,10 @@ app.post("/verify-otp", async (req, res) => {
     }
 
 
-    // Check OTP expiration
+    // =================================================
+    // Check OTP Expiration
+    // =================================================
+
     if (
 
       !record.otp_expires_at ||
@@ -294,7 +291,10 @@ app.post("/verify-otp", async (req, res) => {
     }
 
 
+    // =================================================
     // Check OTP
+    // =================================================
+
     if (
 
       record.otp !== otp.toString().trim()
@@ -312,17 +312,17 @@ app.post("/verify-otp", async (req, res) => {
     }
 
 
-    // ===============================
+    // =================================================
     // OTP Correct
-    // ===============================
+    // =================================================
 
 
-    // Generate access token
+    // Generate secure access token
     const accessToken =
       crypto.randomBytes(32).toString("hex");
 
 
-    // Access valid for 30 days
+    // Access token valid for 30 days
     const tokenExpiresAt = new Date(
 
       Date.now() +
@@ -332,7 +332,10 @@ app.post("/verify-otp", async (req, res) => {
     );
 
 
-    // Save access token in MySQL
+    // =================================================
+    // Save Access Token
+    // =================================================
+
     await db.execute(
 
       `UPDATE access_requests
@@ -367,7 +370,10 @@ app.post("/verify-otp", async (req, res) => {
     );
 
 
-    // Send token to Android app
+    // =================================================
+    // Send Token to Android App
+    // =================================================
+
     res.json({
 
       success: true,
@@ -377,6 +383,7 @@ app.post("/verify-otp", async (req, res) => {
       accessToken
 
     });
+
 
   } catch (error) {
 
@@ -399,9 +406,9 @@ app.post("/verify-otp", async (req, res) => {
 });
 
 
-// ===============================
+// =====================================================
 // Check Existing Access Token
-// ===============================
+// =====================================================
 
 app.get("/check-access", async (req, res) => {
 
@@ -411,6 +418,7 @@ app.get("/check-access", async (req, res) => {
       req.headers.authorization;
 
 
+    // Check Authorization header
     if (!authHeader) {
 
       return res.status(401).json({
@@ -424,8 +432,24 @@ app.get("/check-access", async (req, res) => {
     }
 
 
+    // Expected format:
+    // Authorization: Bearer TOKEN
+
+    if (!authHeader.startsWith("Bearer ")) {
+
+      return res.status(401).json({
+
+        success: false,
+
+        message: "Invalid authorization format"
+
+      });
+
+    }
+
+
     const token =
-      authHeader.replace("Bearer ", "");
+      authHeader.substring(7).trim();
 
 
     if (!token) {
@@ -441,7 +465,10 @@ app.get("/check-access", async (req, res) => {
     }
 
 
-    // Find token in database
+    // =================================================
+    // Find Token in Database
+    // =================================================
+
     const [rows] = await db.execute(
 
       `SELECT *
@@ -458,6 +485,7 @@ app.get("/check-access", async (req, res) => {
     const record = rows[0];
 
 
+    // Token not found
     if (!record) {
 
       return res.status(401).json({
@@ -471,7 +499,10 @@ app.get("/check-access", async (req, res) => {
     }
 
 
-    // Check token expiration
+    // =================================================
+    // Check Token Expiration
+    // =================================================
+
     if (
 
       !record.token_expires_at ||
@@ -493,7 +524,10 @@ app.get("/check-access", async (req, res) => {
     }
 
 
-    // Token is valid
+    // =================================================
+    // Token Valid
+    // =================================================
+
     res.json({
 
       success: true,
@@ -506,11 +540,8 @@ app.get("/check-access", async (req, res) => {
   } catch (error) {
 
     console.error(
-
       "Access check error:",
-
       error
-
     );
 
 
@@ -527,9 +558,9 @@ app.get("/check-access", async (req, res) => {
 });
 
 
-// ===============================
+// =====================================================
 // Test Route
-// ===============================
+// =====================================================
 
 app.get("/", (req, res) => {
 
@@ -543,9 +574,9 @@ app.get("/", (req, res) => {
 });
 
 
-// ===============================
+// =====================================================
 // Start Server
-// ===============================
+// =====================================================
 
 const PORT =
   process.env.PORT || 5001;
