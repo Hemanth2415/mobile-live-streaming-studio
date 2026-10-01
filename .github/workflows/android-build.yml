@@ -2,9 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -19,12 +19,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-size: 'large'
-          node-version: 18
-          cache: 'npm'
+          node-version: 20
+          cache: npm
 
       - name: Install Node dependencies
-        run: npm ci || npm install
+        run: npm ci --include=optional
+
+      - name: Rebuild Tailwind native dependencies
+        run: npm rebuild @tailwindcss/oxide
 
       - name: Build React Web App
         run: npx vite build
@@ -32,7 +34,7 @@ jobs:
       - name: Set up Java JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: zulu
           java-version: '17'
 
       - name: Setup Android SDK
